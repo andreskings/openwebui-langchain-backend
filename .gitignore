@@ -1,4 +1,8 @@
-.venv
+/venv
 /data
 .env
 __pycache__/
+
+/documents
+/chroma_agricultural
+/chroma_agricultural_ultimate
