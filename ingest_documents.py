@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 # Importar el sistema RAG
-from pipelines.rag_agricultural import EnhancedRAGSystem
+from pipelines.rag_agricultural_enhanced import EnhancedRAGSystem
 
 def ingest_pdf(pdf_path: str):
     """Ingestar un PDF al sistema RAG"""

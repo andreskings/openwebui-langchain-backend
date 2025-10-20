@@ -61,8 +61,8 @@ if LANGCHAIN_PROJECT and LANGSMITH_AVAILABLE:
 # ======================
 app = FastAPI(
     title="Backend LangChain para Open WebUI",
-    description="Backend con pipelines LangChain compatible con Open WebUI - Versión Definitiva",
-    version="4.0.0"
+    description="Backend con pipelines LangChain compatible con Open WebUI - Versión Optimizada",
+    version="4.1.0"
 )
 
 # Configuración CORS ultra permisiva
@@ -142,7 +142,7 @@ def create_chat_completion_response(content: str, model: str, request_id: str = 
             "finish_reason": "stop"
         }],
         "usage": {
-            "prompt_tokens": len(content.split()) * 2,  # Estimación
+            "prompt_tokens": len(content.split()) * 2,
             "completion_tokens": len(content.split()),
             "total_tokens": len(content.split()) * 3
         }
@@ -178,32 +178,8 @@ def create_streaming_chunk(content: str, model: str, request_id: str, is_final: 
 
 async def stream_content_async(content: str, model: str, request_id: str) -> Generator[str, None, None]:
     """Genera streaming de contenido de manera asíncrona"""
-    # Chunk inicial
     yield create_streaming_chunk("", model, request_id)
     
-    # Dividir en palabras para streaming natural
-    words = content.split()
-    chunk_size = 3  # Enviar 3 palabras por chunk
-    
-    for i in range(0, len(words), chunk_size):
-        chunk_words = words[i:i + chunk_size]
-        chunk_content = " ".join(chunk_words)
-        if i + chunk_size < len(words):
-            chunk_content += " "
-        
-        yield create_streaming_chunk(chunk_content, model, request_id)
-        await asyncio.sleep(0.05)  # Delay para streaming natural
-    
-    # Chunk final
-    yield create_streaming_chunk("", model, request_id, is_final=True)
-    yield "data: [DONE]\n\n"
-
-def stream_content_sync(content: str, model: str, request_id: str) -> Generator[str, None, None]:
-    """Genera streaming de contenido de manera síncrona"""
-    # Chunk inicial
-    yield create_streaming_chunk("", model, request_id)
-    
-    # Dividir en palabras
     words = content.split()
     chunk_size = 3
     
@@ -214,18 +190,49 @@ def stream_content_sync(content: str, model: str, request_id: str) -> Generator[
             chunk_content += " "
         
         yield create_streaming_chunk(chunk_content, model, request_id)
-        time.sleep(0.02)  # Delay mínimo
+        await asyncio.sleep(0.05)
     
-    # Chunk final
+    yield create_streaming_chunk("", model, request_id, is_final=True)
+    yield "data: [DONE]\n\n"
+
+def stream_content_sync(content: str, model: str, request_id: str) -> Generator[str, None, None]:
+    """Genera streaming de contenido de manera síncrona"""
+    yield create_streaming_chunk("", model, request_id)
+    
+    words = content.split()
+    chunk_size = 3
+    
+    for i in range(0, len(words), chunk_size):
+        chunk_words = words[i:i + chunk_size]
+        chunk_content = " ".join(chunk_words)
+        if i + chunk_size < len(words):
+            chunk_content += " "
+        
+        yield create_streaming_chunk(chunk_content, model, request_id)
+        time.sleep(0.02)
+    
     yield create_streaming_chunk("", model, request_id, is_final=True)
     yield "data: [DONE]\n\n"
 
 def extract_pipeline_output(result: Any) -> str:
-    """Extrae el contenido de la respuesta del pipeline"""
+    """✅ MEJORADO: Extrae el contenido de la respuesta del pipeline"""
     if isinstance(result, dict):
+        # ✅ Formato OpenAI estándar (PRIORIDAD)
+        if "choices" in result and isinstance(result["choices"], list):
+            try:
+                return result["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                pass
+        
+        # Formato legacy "reply"
+        if "reply" in result:
+            return str(result["reply"])
+        
+        # Otros campos comunes
         for key in ["output", "response", "result", "content", "message", "text"]:
             if key in result:
                 return str(result[key])
+        
         return str(result)
     else:
         return str(result)
@@ -233,7 +240,6 @@ def extract_pipeline_output(result: Any) -> str:
 def extract_user_message_from_request(request: Union[Dict, Any]) -> str:
     """Extrae mensaje del usuario de cualquier formato de request"""
     if isinstance(request, dict):
-        # Formato Open WebUI
         if "body" in request:
             body = request["body"]
             if isinstance(body, dict) and "messages" in body:
@@ -243,7 +249,6 @@ def extract_user_message_from_request(request: Union[Dict, Any]) -> str:
                     if isinstance(last_message, dict) and "content" in last_message:
                         return last_message["content"]
         
-        # Formato estándar
         if "messages" in request:
             messages = request["messages"]
             if messages and isinstance(messages, list):
@@ -251,7 +256,6 @@ def extract_user_message_from_request(request: Union[Dict, Any]) -> str:
                 if isinstance(last_message, dict) and "content" in last_message:
                     return last_message["content"]
         
-        # Formato simple
         if "input" in request:
             return str(request["input"])
     
@@ -260,11 +264,9 @@ def extract_user_message_from_request(request: Union[Dict, Any]) -> str:
 def is_streaming_request(request: Union[Dict, Any]) -> bool:
     """Detecta si el request solicita streaming"""
     if isinstance(request, dict):
-        # Nivel superior
         if request.get("stream", False):
             return True
         
-        # En body
         if "body" in request and isinstance(request["body"], dict):
             if request["body"].get("stream", False):
                 return True
@@ -289,33 +291,41 @@ def load_pipelines():
         print(f"[Warning] Directorio {PIPELINES_DIR} no existe")
         return
     
+    # Directorios a excluir del cargado automático
+    EXCLUDED_DIRS = {"failed", "pipelines", "__pycache__", "documents", "example", "test_response_format", "main", "master_pipeline", "example_pipeline"}
+    
     for root, dirs, files in os.walk(PIPELINES_DIR):
+        # Filtrar directorios excluidos para evitar que os.walk() entre en ellos
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
+        
         for file in files:
             if file.endswith(".py") and file != "__init__.py":
-                rel_path = os.path.relpath(os.path.join(root, file), os.path.dirname(__file__))
-                module_name = rel_path.replace(os.sep, ".")[:-3]
-                
-                try:
-                    module = importlib.import_module(module_name)
+                # Solo cargar archivos del directorio raíz de pipelines
+                if root == PIPELINES_DIR:
+                    rel_path = os.path.relpath(os.path.join(root, file), os.path.dirname(__file__))
+                    module_name = rel_path.replace(os.sep, ".")[:-3]
                     
-                    if hasattr(module, "pipeline") and hasattr(module, "metadata"):
-                        key_name = module.metadata.get("name", file[:-3])
-                        pipelines_dict[key_name] = {
-                            "func": module.pipeline,
-                            "metadata": module.metadata
-                        }
-                        print(f"✅ Pipeline {key_name} cargado: {module.metadata.get('description', 'Sin descripción')}")
-                    else:
-                        print(f"⚠️  {file} no tiene 'pipeline' o 'metadata'")
+                    try:
+                        module = importlib.import_module(module_name)
                         
-                except Exception as e:
-                    print(f"❌ Error cargando {file}: {e}")
+                        if hasattr(module, "pipeline") and hasattr(module, "metadata"):
+                            key_name = module.metadata.get("name", file[:-3])
+                            pipelines_dict[key_name] = {
+                                "func": module.pipeline,
+                                "metadata": module.metadata
+                            }
+                            print(f"✅ Pipeline {key_name} cargado: {module.metadata.get('description', 'Sin descripción')}")
+                        else:
+                            print(f"⚠️  {file} no tiene 'pipeline' o 'metadata'")
+                            
+                    except Exception as e:
+                        print(f"❌ Error cargando {file}: {e}")
+                else:
+                    print(f"🔄 Saltando archivo en subdirectorio: {os.path.join(root, file)}")
 
-# Cargar pipelines al inicio
 load_pipelines()
 print(f"🔄 Total pipelines cargados: {len(pipelines_dict)}")
 print(f"📋 Pipelines disponibles: {list(pipelines_dict.keys())}")
-
 # ======================
 # Middleware de logging mejorado
 # ======================
@@ -323,14 +333,12 @@ print(f"📋 Pipelines disponibles: {list(pipelines_dict.keys())}")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
     
-    # Log request
     print(f"[Request] {request.method} {request.url.path}")
     if request.headers.get("content-type") == "application/json":
         print(f"[Request] Headers: {dict(request.headers)}")
     
     response = await call_next(request)
     
-    # Log response
     process_time = time.time() - start_time
     print(f"[Response] {response.status_code} - {process_time:.3f}s")
     
@@ -342,15 +350,16 @@ async def log_requests(request: Request, call_next):
 @app.get("/")
 def root():
     return {
-        "message": "🚀 Backend LangChain para Open WebUI v4.0 - Funcionando Correctamente",
+        "message": "🚀 Backend LangChain para Open WebUI v4.1 - Optimizado para Visualización",
         "status": "running",
         "pipelines_count": len(pipelines_dict),
         "pipelines": list(pipelines_dict.keys()),
-        "version": "4.0.0",
+        "version": "4.1.0",
         "weather_api": "Tomorrow.io" if TOMORROW_API_KEY else "No configurada",
         "features": [
             "streaming_async", "streaming_sync", "chat_completions", 
-            "pipelines", "weather", "cors_permissive", "logging_enhanced"
+            "pipelines", "weather", "cors_permissive", "logging_enhanced",
+            "openai_format_responses"
         ]
     }
 
@@ -423,7 +432,6 @@ def obtener_clima(ciudad: str):
 def list_models():
     models = []
     
-    # Modelos de OpenAI
     if client:
         try:
             response = client.models.list()
@@ -450,7 +458,6 @@ def list_models():
             "owned_by": "openai"
         })
     
-    # Pipelines como modelos
     for name, data in pipelines_dict.items():
         models.append({
             "id": name,
@@ -475,7 +482,7 @@ def list_models_alt():
 # ======================
 @app.get("/v1/models/models")
 def models_models_endpoint():
-    """Endpoint duplicado que Open WebUI busca - resuelve error 405"""
+    """Endpoint duplicado que Open WebUI busca"""
     print("[Models/Models] GET endpoint duplicado llamado")
     return list_models()
 
@@ -486,60 +493,48 @@ def models_models_post():
     return list_models()
 
 # ======================
-# ⚠️ CRITICAL FIX: ENDPOINT ESPECÍFICO PARA CHAT COMPLETIONS MALFORMADO
-# Debe ir ANTES del catch-all para que tenga prioridad
+# ENDPOINT ESPECÍFICO PARA CHAT COMPLETIONS MALFORMADO
 # ======================
 @app.post("/v1/models/chat/completions")
 async def models_chat_completions(request: Request):
-    """Endpoint específico para /v1/models/chat/completions que Open WebUI usa"""
-    print(f"[Models Chat Completions] Request interceptado - redirigiendo a chat completions normal")
-    
-    # Redirigir al endpoint correcto
+    """Endpoint específico para /v1/models/chat/completions"""
+    print(f"[Models Chat Completions] Request interceptado - redirigiendo")
     return await chat_completions(request)
 
 # ======================
-# ⚠️ CRITICAL FIX: ENDPOINTS ESPECÍFICOS PARA PIPELINES MALFORMADOS
-# Open WebUI envía a /v1/models/{pipeline_id}/filter/{type} en lugar de /v1/{pipeline_id}/filter/{type}
+# ENDPOINTS ESPECÍFICOS PARA PIPELINES MALFORMADOS
 # ======================
 @app.post("/v1/models/{pipeline_id}/filter/inlet")
 async def models_pipeline_inlet(pipeline_id: str, request: Request):
-    """Endpoint específico para /v1/models/{pipeline_id}/filter/inlet que Open WebUI usa"""
-    print(f"[Models Pipeline Inlet] Request interceptado para {pipeline_id} - redirigiendo a pipeline inlet normal")
-    
-    # Redirigir al endpoint correcto
+    """Endpoint específico para /v1/models/{pipeline_id}/filter/inlet"""
+    print(f"[Models Pipeline Inlet] Request interceptado para {pipeline_id}")
     return await pipeline_filter_inlet(pipeline_id, request)
 
 @app.post("/v1/models/{pipeline_id}/filter/outlet")
 async def models_pipeline_outlet(pipeline_id: str, request: Request):
-    """Endpoint específico para /v1/models/{pipeline_id}/filter/outlet que Open WebUI usa"""
-    print(f"[Models Pipeline Outlet] Request interceptado para {pipeline_id} - redirigiendo a pipeline outlet normal")
-    
-    # Redirigir al endpoint correcto
+    """Endpoint específico para /v1/models/{pipeline_id}/filter/outlet"""
+    print(f"[Models Pipeline Outlet] Request interceptado para {pipeline_id}")
     return await pipeline_filter_outlet(pipeline_id, request)
 
 # ======================
-# ⚠️ CRITICAL FIX: CATCH-ALL CORREGIDO - AHORA VA DESPUÉS
+# CATCH-ALL MODELS
 # ======================
 @app.api_route("/v1/models/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_models_paths(path: str, request: Request):
-    """Catch-all CORREGIDO - Solo para modelos reales, NO pipelines ni chat"""
+    """Catch-all para modelos"""
     print(f"[Models Catch-All] {request.method} /v1/models/{path}")
     
-    # CRITICAL: Si el path contiene 'filter', es un pipeline - NO interceptar
     if 'filter' in path:
         print(f"[Models Catch-All] IGNORANDO pipeline request: {path}")
-        print(f"[Models Catch-All] Request debe ir a endpoint correcto de pipeline")
         raise HTTPException(status_code=404, detail="Endpoint not handled by models catch-all")
     
-    # Para chat/completions, debería haber sido manejado por el endpoint específico arriba
     if path == 'chat/completions':
-        print(f"[Models Catch-All] ERROR: chat/completions llegó al catch-all (no debería pasar)")
+        print(f"[Models Catch-All] ERROR: chat/completions llegó al catch-all")
         return JSONResponse({
             "error": "chat/completions should be handled by specific endpoint",
             "redirect_to": "/v1/chat/completions"
         }, status_code=500)
     
-    # Solo para rutas de modelos normales
     return list_models()
 
 # ======================
@@ -547,15 +542,13 @@ async def catch_models_paths(path: str, request: Request):
 # ======================
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    """Endpoint de chat con máxima compatibilidad y flexibilidad"""
+    """Endpoint de chat con máxima compatibilidad"""
     
     try:
-        # Obtener datos del request de manera flexible
         request_data = await request.json()
         
         print(f"[Chat Completions] Request data: {request_data}")
         
-        # Extraer campos
         model = request_data.get("model", MODEL_ID)
         messages = request_data.get("messages", [])
         temperature = request_data.get("temperature", TEMPERATURE)
@@ -572,14 +565,12 @@ async def chat_completions(request: Request):
             try:
                 pipeline_func = pipelines_dict[model]["func"]
                 
-                # CORRECCIÓN: Agregar formato body para compatibilidad con pipelines
                 pipeline_input = {
                     "messages": messages,
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "model": model,
                     "stream": stream,
-                    # NUEVO: Agregar formato body que los pipelines esperan
                     "body": {
                         "messages": messages,
                         "model": model,
@@ -589,10 +580,8 @@ async def chat_completions(request: Request):
                     }
                 }
                 
-                # NUEVO: Si hay choices en el request original, incluirlos
                 if "choices" in request_data:
                     pipeline_input["choices"] = request_data["choices"]
-                    print(f"[Chat Completions] Choices incluidos en pipeline input")
                 
                 result = pipeline_func(pipeline_input)
                 content = extract_pipeline_output(result)
@@ -687,37 +676,41 @@ async def chat_completions(request: Request):
 # ======================
 @app.post("/v1/{pipeline_id}/filter/inlet")
 async def pipeline_filter_inlet(pipeline_id: str, request: Request):
-    """
-    Endpoint DEFINITIVO para Open WebUI - TODAS las compatibilidades
-    """
+    """✅ OPTIMIZADO: Endpoint para Open WebUI con formato OpenAI"""
     if pipeline_id not in pipelines_dict:
         print(f"[Filter Inlet] Pipeline {pipeline_id} no encontrado")
         return JSONResponse({"bypass": True, "message": "Pipeline not found"})
     
     try:
-        # Obtener request data
         request_data = await request.json()
         
         print(f"[Filter Inlet] Pipeline: {pipeline_id}")
         print(f"[Filter Inlet] Request data keys: {list(request_data.keys())}")
         
-        # Ejecutar pipeline
         pipeline_func = pipelines_dict[pipeline_id]["func"]
         result = pipeline_func(request_data)
-        content = extract_pipeline_output(result)
         
-        # Detectar streaming
+        # ✅ NUEVO: Verificar si ya viene en formato OpenAI
+        if isinstance(result, dict) and "choices" in result:
+            # Ya está en formato correcto, usar directamente
+            print(f"[Filter Inlet] Pipeline devolvió formato OpenAI nativo")
+            content = extract_pipeline_output(result)
+            response_data = result
+        else:
+            # Convertir a formato OpenAI
+            content = extract_pipeline_output(result)
+            request_id = f"chatcmpl-{uuid.uuid4().hex}"
+            response_data = create_chat_completion_response(content, pipeline_id, request_id)
+        
         is_streaming = is_streaming_request(request_data)
         
         print(f"[Filter Inlet] Streaming: {is_streaming}")
         print(f"[Filter Inlet] Content length: {len(content)}")
         print(f"[Filter Inlet] Content preview: {content[:100]}...")
         
-        request_id = f"chatcmpl-{uuid.uuid4().hex}"
-        
-        # Respuesta con streaming
         if is_streaming:
             print(f"[Filter Inlet] Iniciando streaming response")
+            request_id = f"chatcmpl-{uuid.uuid4().hex}"
             
             return StreamingResponse(
                 stream_content_sync(content, pipeline_id, request_id),
@@ -734,12 +727,10 @@ async def pipeline_filter_inlet(pipeline_id: str, request: Request):
                 }
             )
         else:
-            # Respuesta normal con formato OpenAI (COMO FUNCIONABA ORIGINALMENTE)
-            response = create_chat_completion_response(content, pipeline_id, request_id)
-            print(f"[Filter Inlet] Respuesta normal enviada")
+            print(f"[Filter Inlet] Respuesta normal enviada en formato OpenAI")
             
             return JSONResponse(
-                content=response,
+                content=response_data,
                 headers={
                     "Access-Control-Allow-Origin": "*",
                     "Access-Control-Allow-Headers": "*"
@@ -763,15 +754,12 @@ async def pipeline_filter_inlet(pipeline_id: str, request: Request):
 # ======================
 @app.post("/v1/{pipeline_id}/filter/outlet")
 async def pipeline_filter_outlet(pipeline_id: str, request: Request):
-    """
-    Endpoint outlet para Open WebUI - resuelve error 405
-    """
+    """Endpoint outlet para Open WebUI"""
     try:
         request_data = await request.json()
         print(f"[Filter Outlet] Pipeline: {pipeline_id}")
         print(f"[Filter Outlet] Request data: {request_data}")
         
-        # Open WebUI espera que devolvamos el contenido sin modificar
         return JSONResponse({
             "bypass": True,
             "message": "Filter outlet processed"
@@ -786,9 +774,7 @@ async def pipeline_filter_outlet(pipeline_id: str, request: Request):
 
 @app.api_route("/v1/{pipeline_id}/filter/{filter_type:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def catch_filter_paths(pipeline_id: str, filter_type: str, request: Request):
-    """
-    Catch-all para cualquier endpoint de filter que no exista
-    """
+    """Catch-all para endpoints de filter"""
     print(f"[Filter Catch-All] {request.method} /v1/{pipeline_id}/filter/{filter_type}")
     
     try:
@@ -864,24 +850,19 @@ async def options_handler(path: str):
 # ======================
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"])
 async def catch_all_endpoint(path: str, request: Request):
-    """
-    Catch-all final para cualquier endpoint no manejado
-    """
+    """Catch-all final para cualquier endpoint no manejado"""
     if path.startswith("v1/"):
         print(f"[Catch-All] {request.method} /{path} - Endpoint no encontrado")
         
-        # Si es un endpoint de modelos, redirigir
         if "models" in path and "filter" not in path:
             return list_models()
         
-        # Si es un endpoint de pipeline mal dirigido
         if any(pipeline_id in path for pipeline_id in pipelines_dict.keys()):
             return JSONResponse({
                 "bypass": True,
                 "message": f"Pipeline endpoint /{path} processed"
             })
         
-        # Para otros endpoints v1
         return JSONResponse({
             "error": f"Endpoint /{path} not found",
             "available_endpoints": [
@@ -893,7 +874,6 @@ async def catch_all_endpoint(path: str, request: Request):
             ]
         }, status_code=404)
     
-    # Para endpoints que no son v1, return 404 normal
     raise HTTPException(status_code=404, detail=f"Endpoint /{path} not found")
 
 # ======================
@@ -901,7 +881,7 @@ async def catch_all_endpoint(path: str, request: Request):
 # ======================
 @app.on_event("startup")
 async def startup():
-    print("🚀 Backend v4.0 - FUNCIONANDO CORRECTAMENTE iniciado")
+    print("🚀 Backend v4.1 - OPTIMIZADO PARA VISUALIZACIÓN iniciado")
     print(f"📊 Pipelines: {len(pipelines_dict)}")
     print(f"📋 Lista: {list(pipelines_dict.keys())}")
     print(f"🌤️  API clima: {'✅' if TOMORROW_API_KEY else '❌'}")
@@ -909,13 +889,16 @@ async def startup():
     print(f"🎥 Streaming: ✅ (sync + async)")
     print(f"🌐 CORS: ✅ (ultra permisivo)")
     print(f"📝 Logging: ✅ (enhanced)")
+    print(f"✨ Formato OpenAI: ✅ (respuestas optimizadas)")
     print(f"🔧 Endpoints críticos:")
-    print(f"   - /v1/{{pipeline_id}}/filter/inlet")
+    print(f"   - /v1/{{pipeline_id}}/filter/inlet (formato OpenAI)")
     print(f"   - /v1/{{pipeline_id}}/filter/outlet")
     print(f"   - /v1/chat/completions")
-    print(f"   - /v1/models (+ catch-all CORREGIDO)")
-    print(f"✅ FIX APLICADO: Catch-all ya NO intercepta pipelines")
-    print(f"✅ FORMATO ORIGINAL: Respuestas OpenAI mantenidas")
+    print(f"   - /v1/models (+ catch-all)")
+    print(f"✅ MEJORAS APLICADAS:")
+    print(f"   - Respuestas en formato OpenAI nativo")
+    print(f"   - extract_pipeline_output optimizado")
+    print(f"   - Detección automática de formato")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -923,5 +906,5 @@ async def shutdown():
 
 if __name__ == "__main__":
     import uvicorn
-    print("🌟 Iniciando servidor v4.0 - FUNCIONANDO CORRECTAMENTE...")
+    print("🌟 Iniciando servidor v4.1 - OPTIMIZADO PARA VISUALIZACIÓN...")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True, log_level="info")

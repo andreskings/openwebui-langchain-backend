@@ -1,316 +1,391 @@
-# super_agroia_chat.py - Pipeline Inteligente de Chat Agrícola Completo
+# super_agroia_master_integrated.py - AgroIA Master con RAG integrado v2.2
 import os
 import sys
 import requests
 import json
 import re
-from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
+from datetime import datetime
 import importlib.util
 
+# Intentar importar el sistema RAG de múltiples formas
+RAG_AVAILABLE = False
+EnhancedRAGSystem = None
+
+# Método 1: Importación directa
+try:
+    from pipelines.rag_agricultural_enhanced import EnhancedRAGSystem
+    RAG_AVAILABLE = True
+    print("[AgroIA] ✓ RAG importado directamente")
+except ImportError as e:
+    print(f"[AgroIA] Advertencia: Import directo falló: {e}")
+    
+    # Método 2: Importación dinámica con path
+    try:
+        possible_paths = [
+            "rag_agricultural_enhanced.py",
+            "./rag_agricultural_enhanced.py",
+            "../rag_agricultural_enhanced.py",
+            os.path.join(os.path.dirname(__file__), "rag_agricultural_enhanced.py"),
+            os.path.join(os.getcwd(), "rag_agricultural_enhanced.py")
+        ]
+        
+        rag_path = None
+        for path in possible_paths:
+            full_path = os.path.abspath(path)
+            if os.path.exists(full_path):
+                rag_path = full_path
+                print(f"[AgroIA] Encontrado RAG en: {rag_path}")
+                break
+        
+        if rag_path:
+            spec = importlib.util.spec_from_file_location("rag_agricultural_enhanced", rag_path)
+            rag_module = importlib.util.module_from_spec(spec)
+            sys.modules["rag_agricultural_enhanced"] = rag_module
+            spec.loader.exec_module(rag_module)
+            EnhancedRAGSystem = rag_module.EnhancedRAGSystem
+            RAG_AVAILABLE = True
+            print("[AgroIA] ✓ RAG importado dinámicamente")
+        else:
+            print("[AgroIA] Archivo rag_agricultural_enhanced.py no encontrado")
+            print(f"[AgroIA] Buscado en: {os.getcwd()}")
+            
+    except Exception as e:
+        print(f"[AgroIA] Error en import dinámico: {e}")
+        import traceback
+        traceback.print_exc()
+
 metadata = {
-    "name": "super_agroia_chat",
-    "description": "Super Chat IA Agrícola - Asistente completo con acceso a clima, precios, RAG y múltiples fuentes",
-    "type": "llm", 
-    "version": "1.0.0"
+    "name": "super_agroia_master_integrated",
+    "description": "Super AgroIA Master - Chat inteligente con RAG, clima, precios y experto agrónomo integrado",
+    "type": "llm",
+    "version": "2.2.0"
 }
 
-class SuperAgroIAChat:
-    """Super Chat IA que puede consultar múltiples fuentes y razonar como un ingeniero agrónomo"""
+
+class RAGWrapper:
+    """Wrapper ligero para el sistema RAG"""
+    def __init__(self):
+        print(f"\n[RAGWrapper] Inicializando...")
+        print(f"[RAGWrapper] RAG_AVAILABLE = {RAG_AVAILABLE}")
+        print(f"[RAGWrapper] EnhancedRAGSystem = {EnhancedRAGSystem}")
+        
+        if RAG_AVAILABLE and EnhancedRAGSystem:
+            try:
+                print("[RAGWrapper] Creando instancia de EnhancedRAGSystem...")
+                self.rag_system = EnhancedRAGSystem()
+                docs_count = self.rag_system.vector_store.count()
+                self.enabled = True
+                print(f"[RAGWrapper] ✓ Inicializado exitosamente - {docs_count} documentos en Chroma")
+            except Exception as e:
+                print(f"[RAGWrapper] Error inicializando EnhancedRAGSystem: {e}")
+                import traceback
+                traceback.print_exc()
+                self.rag_system = None
+                self.enabled = False
+        else:
+            print("[RAGWrapper] RAG no disponible")
+            self.rag_system = None
+            self.enabled = False
+    
+    def query(self, user_query: str, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Consulta al sistema RAG con formato optimizado"""
+        print(f"\n[RAGWrapper.query] Iniciando consulta")
+        print(f"[RAGWrapper.query] enabled = {self.enabled}")
+        print(f"[RAGWrapper.query] rag_system = {self.rag_system}")
+        
+        if not self.enabled or not self.rag_system:
+            print("[RAGWrapper.query] RAG no habilitado o sin sistema")
+            return None
+        
+        try:
+            total_docs = self.rag_system.vector_store.count()
+            print(f"[RAGWrapper.query] {total_docs} documentos en base")
+            
+            if total_docs == 0:
+                print("[RAGWrapper.query] Base de datos vacía")
+                return {
+                    "success": False,
+                    "response": None,
+                    "metadata": {"chunks_found": 0, "total_chunks": 0}
+                }
+            
+            print(f"[RAGWrapper.query] Buscando chunks para: '{user_query[:50]}...'")
+            relevant_chunks = self.rag_system.search_and_rerank(user_query, top_k=12, rerank_k=6)
+            
+            print(f"[RAGWrapper.query] Encontrados {len(relevant_chunks)} chunks relevantes")
+            
+            if not relevant_chunks:
+                print("[RAGWrapper.query] Sin chunks relevantes")
+                return {
+                    "success": False,
+                    "response": None,
+                    "metadata": {"chunks_found": 0, "total_chunks": total_docs}
+                }
+            
+            print(f"[RAGWrapper.query] Generando respuesta con LLM...")
+            response_data = self.rag_system.generate_grounded_response(user_query, relevant_chunks)
+            
+            if response_data.get("error"):
+                print(f"[RAGWrapper.query] Error generando respuesta: {response_data.get('error')}")
+                return None
+            
+            final_response = response_data['answer']
+            print(f"[RAGWrapper.query] ✓ Respuesta generada: {len(final_response)} caracteres")
+            
+            # Agregar referencias
+            if response_data.get('sources'):
+                final_response += "\n\n" + "=" * 78
+                final_response += "\n" + " " * 28 + "REFERENCIAS"
+                final_response += "\n" + "=" * 78 + "\n"
+                
+                for ref_id in sorted(response_data['sources'].keys(), key=lambda x: int(x.strip('[]'))):
+                    source_info = response_data['sources'][ref_id]
+                    final_response += f"\n- Citation {ref_id}"
+                    final_response += f"\n  Source: {source_info['source_file']}"
+                    final_response += f"\n  Relevance: {source_info['similarity']*100:.2f}%"
+                    final_response += f"\n  Section: {source_info['section_type']}"
+                    final_response += "\n" + "-" * 78 + "\n"
+            
+            return {
+                "success": True,
+                "response": final_response,
+                "metadata": {
+                    "chunks_found": len(relevant_chunks),
+                    "total_chunks": total_docs
+                }
+            }
+            
+        except Exception as e:
+            print(f"[RAGWrapper.query] ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        return None
+
+
+class SuperAgroIAMaster:
+    """Orquestador inteligente con RAG integrado"""
     
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY")
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        self.rag = RAGWrapper()
         
-        # Configuración de herramientas disponibles
+        # Herramientas disponibles
         self.tools = {
-            # Pipelines especializados
-            "weather_forecast": {
-                "file": "weather_pipeline.py",
-                "description": "Pronósticos meteorológicos detallados de Chile",
-                "capabilities": ["clima actual", "pronóstico 7 días", "condiciones para aplicaciones", "alertas meteorológicas"]
+            "rag": {
+                "enabled": self.rag.enabled,
+                "description": "Documentos agrícolas (etiquetas, análisis, manuales)",
+                "keywords": ["etiqueta", "documento", "manual", "análisis", "producto", "dosis", "aplicación"]
             },
-            "market_prices": {
-                "file": "mercadolibre_pipeline.py", 
-                "description": "Precios de productos agrícolas y insumos",
-                "capabilities": ["precios herbicidas", "fertilizantes", "maquinaria", "semillas", "comparar proveedores"]
+            "weather": {
+                "file": "pipelines/weather_pipeline.py",
+                "description": "Clima y pronósticos de Chile",
+                "keywords": ["clima", "tiempo", "pronóstico", "lluvia", "temperatura", "mañana", "aplicar", "hoy", 
+                           "chillan", "santiago", "valparaiso", "concepcion", "temuco", "valdivia", "osorno", 
+                           "puerto montt", "iquique", "antofagasta", "la serena", "rancagua", "talca", "curico",
+                           "linares", "chillán", "los angeles", "angol", "villarrica", "pucón", "castro",
+                           "coyhaique", "punta arenas", "arica", "calama", "copiapó", "ovalle", "quillota"]
             },
-            "web_search": {
-                "file": "google_pipeline.py",
-                "description": "Búsquedas especializadas en web",
-                "capabilities": ["información técnica", "plagas y enfermedades", "mejores prácticas", "regulaciones"]
+            "prices": {
+                "file": "pipelines/mercadolibre_pipeline.py",
+                "description": "Precios de insumos agrícolas",
+                "keywords": ["precio", "costo", "comprar", "valor"]
             },
-            "document_rag": {
-                "file": "langchain_pipeline.py",
-                "description": "Análisis de documentos y RAG sobre archivos específicos",
-                "capabilities": ["análisis de suelos", "informes técnicos", "manuales", "regulaciones específicas"]
-            },
-            
-            # OpenAI especializado
-            "agronomist_expert": {
+            "expert": {
                 "type": "openai",
                 "model": "gpt-4o",
-                "description": "Conocimiento experto en agronomía y agricultura",
-                "system_prompt": """Eres un ingeniero agrónomo experto con 20+ años de experiencia. 
-                Conoces sobre: cultivos, suelos, plagas, enfermedades, fertilización, riego, maquinaria agrícola, 
-                meteorología aplicada, fitosanidad, y regulaciones agrícolas.
-                Siempre das recomendaciones prácticas, considerando factores económicos y ambientales."""
-            },
-            "technical_advisor": {
-                "type": "openai", 
-                "model": "gpt-4o-mini",
-                "description": "Asesor técnico para procedimientos y cálculos",
-                "system_prompt": """Eres un asesor técnico especializado en agricultura de precisión.
-                Ayudas con: cálculos de dosificación, calendarios de aplicación, interpretación de análisis,
-                optimización de recursos, y recomendaciones técnicas específicas."""
-            }
-        }
-        
-        # Contexto de conocimiento agrícola base
-        self.agricultural_context = {
-            "crops": ["trigo", "maíz", "soja", "avena", "cebada", "arroz", "papa", "tomate", "uva", "palta"],
-            "seasons": {
-                "spring": ["septiembre", "octubre", "noviembre"],
-                "summer": ["diciembre", "enero", "febrero"], 
-                "autumn": ["marzo", "abril", "mayo"],
-                "winter": ["junio", "julio", "agosto"]
-            },
-            "critical_periods": {
-                "siembra": ["marzo", "abril", "septiembre", "octubre"],
-                "aplicaciones": ["octubre", "noviembre", "diciembre", "enero"],
-                "cosecha": ["febrero", "marzo", "abril", "mayo"]
+                "description": "Experto agrónomo",
+                "system_prompt": """Eres un ingeniero agrónomo con 20+ años de experiencia.
+
+REGLAS CRÍTICAS DE SEGURIDAD:
+- NUNCA recomiendes un herbicida si no está EXPLÍCITAMENTE documentado que controla esa maleza específica
+- NUNCA recomiendes un herbicida si no está EXPLÍCITAMENTE documentado que es apto para ese cultivo específico
+- Si no hay información específica, di claramente: "No se encuentra información documentada sobre [producto] para [maleza] en [cultivo]"
+- PROHIBIDO inventar o asumir compatibilidades no documentadas
+
+REGLAS ULTRA-ESTRICTAS PARA MALEZAS:
+- Si preguntan "¿qué herbicida para [maleza]?" y los documentos NO mencionan explícitamente esa maleza específica, responde: "No se encuentra información documentada sobre herbicidas específicos para [maleza] en la base de datos actual"
+- NO recomiendes productos basándote en similitudes o suposiciones
+- SOLO cita productos que EXPLÍCITAMENTE mencionen la maleza en cuestión
+- Si un documento habla de "malezas de hoja ancha" pero no menciona "correhuela" específicamente, NO lo recomiendes para correhuela
+- VERIFICA que el documento mencione la maleza por su nombre común O científico antes de recomendarlo
+
+Proporciona recomendaciones prácticas considerando factores técnicos, económicos y ambientales.
+Sé conciso pero completo. Prioriza la seguridad y eficacia."""
             }
         }
     
-    def analyze_agricultural_query(self, user_query: str) -> Dict[str, Any]:
-        """Análisis inteligente específico para consultas agrícolas"""
+    def analyze_query(self, query: str, history: List[Dict[str, str]] = None) -> List[str]:
+        """Análisis inteligente mejorado de qué herramientas necesita"""
+        query_lower = query.lower()
+        needed = []
         
-        analysis_prompt = f"""
-Eres un experto en análisis de consultas agrícolas. Analiza esta consulta y determina:
-
-CONSULTA: "{user_query}"
-
-HERRAMIENTAS DISPONIBLES:
-- weather_forecast: Clima y pronósticos (Chile)
-- market_prices: Precios de insumos agrícolas 
-- web_search: Búsquedas técnicas especializadas
-- document_rag: Análisis de documentos/RAG específicos
-- agronomist_expert: Conocimiento experto en agronomía
-- technical_advisor: Asesor técnico y cálculos
-
-PATRONES A DETECTAR:
-1. ¿Menciona clima/tiempo/pronóstico? → weather_forecast
-2. ¿Menciona precios/costos/comprar? → market_prices  
-3. ¿Necesita info técnica/investigación? → web_search
-4. ¿Menciona documentos/análisis/fundo específico? → document_rag
-5. ¿Requiere conocimiento agronómico profundo? → agronomist_expert
-6. ¿Necesita cálculos/procedimientos técnicos? → technical_advisor
-
-CONTEXTO AGRÍCOLA:
-- Detecta cultivos mencionados: {', '.join(self.agricultural_context['crops'])}
-- Identifica época del año y relación con actividades
-- Considera factores como plagas, enfermedades, fertilización, riego
-
-Responde en JSON:
-{{
-  "query_type": "tipo de consulta (ej: aplicacion_herbicida, analisis_suelo, planificacion_cultivo)",
-  "complexity": "simple|medium|complex",
-  "tools_needed": ["herramienta1", "herramienta2"],
-  "agricultural_factors": ["factor1", "factor2"],
-  "reasoning": "explicación del análisis",
-  "execution_strategy": "como combinar las respuestas"
-}}
-"""
-
-        try:
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "gpt-4o-mini",
-                    "messages": [{"role": "user", "content": analysis_prompt}],
-                    "temperature": 0.2,
-                    "max_tokens": 400
-                },
-                timeout=15
-            )
+        context_text = query_lower
+        mentioned_products = set()
+        
+        # Detectar si la consulta actual es sobre malezas específicas
+        weed_indicators = ["maleza", "malezas", "controlar", "control", "eliminar", "herbicida para", "que herbicida", "qué herbicida"]
+        is_weed_query = any(indicator in query_lower for indicator in weed_indicators)
+        
+        # Solo usar historial si NO es una consulta nueva sobre malezas
+        if history and not is_weed_query:
+            for msg in history:
+                content_lower = msg.get("content", "").lower()
+                for product in ["shark", "fordor", "vulcano", "zorro", "tiburon", "asulox"]:
+                    if product in content_lower:
+                        mentioned_products.add(product)
+                        print(f"[Análisis] Producto del historial: {product}")
+                
+                context_text += " " + content_lower
+        elif is_weed_query:
+            print(f"[Análisis] Consulta sobre malezas detectada - ignorando historial para búsqueda amplia")
+        
+        # PRIORIDAD 1: Detectar productos/documentos específicos
+        product_indicators = [
+            "shark", "fordor", "vulcano", "zorro", "tiburon", "asulox", "aliado", "sencor", 
+            "glifoglex", "genius", "kerb", "loyant", "tordon", "raker", "atrazina", "producto",
+            "etiqueta", "ficha", "manual", "hoja de seguridad",
+            "dosis", "aplicacion", "aplicaciones", "temporada",
+            "maximo", "minimo", "limite", "intervalo", "carencia",
+            "aplicarlo", "usarlo", "ese producto"
+        ]
+        
+        has_product_reference = any(ind in context_text for ind in product_indicators)
+        
+        if (has_product_reference or mentioned_products) and self.rag.enabled:
+            needed.append("rag")
+            print(f"[Análisis] RAG activado - Productos: {mentioned_products or 'detectado en query'}")
+        
+        # PRIORIDAD 2: Detectar otras herramientas por palabras clave
+        for tool_name, config in self.tools.items():
+            if tool_name == "rag":
+                continue
+            if not config.get("enabled", True):
+                continue
             
-            if response.status_code == 200:
-                content = response.json()['choices'][0]['message']['content'].strip()
-                
-                # Extraer JSON
-                if content.startswith('```'):
-                    content = content.split('\n', 1)[1].rsplit('\n', 1)[0]
-                
-                result = json.loads(content)
-                
-                # Validar herramientas
-                valid_tools = [tool for tool in result.get("tools_needed", []) if tool in self.tools]
-                result["tools_needed"] = valid_tools
-                
-                return result
-                
-        except Exception as e:
-            print(f"[SuperAgroIA] Error en análisis inteligente: {e}")
+            keywords = config.get("keywords", [])
+            if any(kw in query_lower for kw in keywords):
+                needed.append(tool_name)
+                print(f"[Análisis] {tool_name} activado - keyword detectada")
         
-        # Fallback a análisis por reglas
-        return self.analyze_by_rules(user_query)
+        # PRIORIDAD 3: Si no detectó nada específico
+        if not needed:
+            if self.rag.enabled:
+                needed.append("rag")
+            needed.append("expert")
+        
+        # PRIORIDAD 4: Agregar experto para síntesis si hay múltiples fuentes
+        if len(needed) > 1 and "expert" not in needed:
+            needed.append("expert")
+        
+        return needed[:3]
     
-    def analyze_by_rules(self, user_query: str) -> Dict[str, Any]:
-        """Análisis de respaldo usando reglas específicas agrícolas"""
-        query_lower = user_query.lower()
-        tools = []
-        factors = []
+    def execute_rag(self, query: str, request: Dict[str, Any]) -> Optional[str]:
+        """Ejecuta consulta RAG con validación mejorada"""
+        result = self.rag.query(query, request)
         
-        # Detección por palabras clave agrícolas
-        if any(word in query_lower for word in ["clima", "tiempo", "pronóstico", "lluvia", "temperatura", "viento"]):
-            tools.append("weather_forecast")
-            factors.append("condiciones_meteorológicas")
-        
-        if any(word in query_lower for word in ["precio", "costo", "comprar", "herbicida", "fertilizante", "insumo"]):
-            tools.append("market_prices") 
-            factors.append("factor_económico")
-        
-        if any(word in query_lower for word in ["buscar", "investigar", "plaga", "enfermedad", "técnica"]):
-            tools.append("web_search")
-            factors.append("información_técnica")
-        
-        if any(word in query_lower for word in ["documento", "análisis", "suelo", "fundo", "informe"]):
-            tools.append("document_rag")
-            factors.append("análisis_específico")
-        
-        # Siempre incluir experto agrónomo para consultas complejas
-        if len(tools) > 1 or any(crop in query_lower for crop in self.agricultural_context["crops"]):
-            tools.append("agronomist_expert")
-            factors.append("conocimiento_agronómico")
-        
-        # Default mínimo
-        if not tools:
-            tools = ["agronomist_expert"]
-            factors = ["consulta_general"]
-        
-        complexity = "simple" if len(tools) == 1 else "medium" if len(tools) == 2 else "complex"
-        
-        return {
-            "query_type": "consulta_agricola",
-            "complexity": complexity,
-            "tools_needed": tools[:3],  # Máximo 3 herramientas
-            "agricultural_factors": factors,
-            "reasoning": "Análisis automático por patrones agrícolas",
-            "execution_strategy": "consultar_fuentes_y_sintetizar"
-        }
-    
-    def execute_tool(self, tool_name: str, user_query: str, context: str = "") -> str:
-        """Ejecuta una herramienta específica"""
-        
-        if tool_name not in self.tools:
-            return f"❌ Herramienta {tool_name} no disponible"
-        
-        tool_config = self.tools[tool_name]
-        
-        try:
-            if tool_config.get("type") == "openai":
-                # Es un modelo de OpenAI especializado
-                return self.call_specialized_openai(tool_name, user_query, context)
+        if result and result.get("success"):
+            response = result["response"]
+            chunks = result["metadata"].get("chunks_found", 0)
+            total = result["metadata"].get("total_chunks", 0)
+            
+            if chunks > 0:
+                return response
+            elif total > 0:
+                return None
             else:
-                # Es un pipeline local
-                return self.call_local_pipeline(tool_name, user_query, context)
-                
-        except Exception as e:
-            print(f"[SuperAgroIA] Error ejecutando {tool_name}: {e}")
-            return f"❌ Error en {tool_name}: {str(e)}"
-    
-    def call_local_pipeline(self, tool_name: str, user_query: str, context: str = "") -> str:
-        """Ejecuta un pipeline local específico"""
+                return None
         
-        tool_config = self.tools[tool_name]
-        pipeline_file = tool_config["file"]
+        return None
+    
+    def execute_pipeline(self, tool_name: str, query: str) -> Optional[str]:
+        """Ejecuta pipeline externo con mejor manejo de errores"""
+        tool = self.tools.get(tool_name)
+        if not tool or "file" not in tool:
+            print(f"[execute_pipeline] Tool {tool_name} no tiene archivo")
+            return None
         
         try:
-            # Buscar archivo del pipeline
-            possible_paths = [
-                os.path.join(os.path.dirname(__file__), pipeline_file),
-                os.path.join(os.path.dirname(__file__), "..", pipeline_file),
-                os.path.join(os.getcwd(), pipeline_file),
-                pipeline_file
+            pipeline_file = tool["file"]
+            print(f"[execute_pipeline] Buscando: {pipeline_file}")
+            
+            # Buscar archivo en múltiples ubicaciones
+            search_paths = [
+                os.path.dirname(__file__),
+                os.getcwd(),
+                os.path.join(os.getcwd(), "pipelines"),
+                os.path.dirname(os.path.abspath(__file__))
             ]
             
-            pipeline_path = None
-            for path in possible_paths:
-                if os.path.exists(os.path.abspath(path)):
-                    pipeline_path = os.path.abspath(path)
+            found_path = None
+            for path_base in search_paths:
+                # Si pipeline_file ya tiene "pipelines/", no duplicar
+                if "pipelines" in pipeline_file:
+                    full_path = os.path.join(path_base, os.path.basename(pipeline_file))
+                else:
+                    full_path = os.path.join(path_base, pipeline_file)
+                
+                print(f"[execute_pipeline]   Probando: {full_path}")
+                if os.path.exists(full_path):
+                    found_path = full_path
+                    print(f"[execute_pipeline] ✓ Encontrado en: {full_path}")
                     break
             
-            if not pipeline_path:
-                return f"❌ Pipeline {pipeline_file} no encontrado"
+            if not found_path:
+                print(f"[execute_pipeline] Archivo no encontrado: {pipeline_file}")
+                print(f"[execute_pipeline]    Buscado en: {search_paths}")
+                return None
             
-            print(f"[SuperAgroIA] Ejecutando {tool_name}: {pipeline_path}")
-            
-            # Importar dinámicamente
-            spec = importlib.util.spec_from_file_location(tool_name, pipeline_path)
+            # Importar módulo
+            print(f"[execute_pipeline] Importando módulo...")
+            spec = importlib.util.spec_from_file_location(tool_name, found_path)
             module = importlib.util.module_from_spec(spec)
-            
-            # Agregar directorio al path
-            pipeline_dir = os.path.dirname(pipeline_path)
-            if pipeline_dir not in sys.path:
-                sys.path.insert(0, pipeline_dir)
-            
             spec.loader.exec_module(module)
             
-            # Preparar request con contexto adicional
-            enhanced_query = user_query
-            if context:
-                enhanced_query = f"CONTEXTO: {context}\n\nCONSULTA: {user_query}"
-            
-            request_data = {
-                "body": {
-                    "messages": [{"role": "user", "content": enhanced_query}],
-                    "model": tool_name,
-                    "temperature": 0.7,
-                    "max_tokens": 2000
-                },
-                "messages": [{"role": "user", "content": enhanced_query}],
-                "model": tool_name,
-                "user": {"name": "SuperAgroIA", "id": "super_chat"}
-            }
+            # Verificar que tenga función pipeline
+            if not hasattr(module, 'pipeline'):
+                print(f"[execute_pipeline] Módulo sin función 'pipeline'")
+                return None
             
             # Ejecutar pipeline
-            if hasattr(module, 'pipeline'):
-                result = module.pipeline(request_data)
-                
-                # Extraer respuesta
-                if isinstance(result, dict):
-                    for key in ["output", "response", "result", "content"]:
-                        if key in result and result[key]:
-                            return str(result[key])
-                    return str(result)
-                else:
-                    return str(result)
+            print(f"[execute_pipeline] Ejecutando pipeline...")
+            result = module.pipeline({
+                "messages": [{"role": "user", "content": query}]
+            })
+            
+            print(f"[execute_pipeline] Resultado tipo: {type(result)}")
+            
+            # Extraer respuesta
+            if isinstance(result, dict):
+                response = result.get("output") or result.get("response") or str(result)
             else:
-                return f"❌ {pipeline_file} sin función pipeline"
-                
+                response = str(result)
+            
+            print(f"[execute_pipeline] ✓ Respuesta: {len(response)} caracteres")
+            return response
+            
         except Exception as e:
-            return f"❌ Error ejecutando {tool_name}: {str(e)}"
+            print(f"[execute_pipeline] ERROR en {tool_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
-    def call_specialized_openai(self, tool_name: str, user_query: str, context: str = "") -> str:
-        """Llama a OpenAI con configuración especializada"""
+    def call_expert(self, query: str, context: str = "") -> str:
+        """Llama al experto agrónomo"""
+        tool = self.tools["expert"]
         
-        tool_config = self.tools[tool_name]
+        messages = [
+            {"role": "system", "content": tool["system_prompt"]}
+        ]
+        
+        if context:
+            messages.append({"role": "system", "content": f"INFORMACIÓN DISPONIBLE:\n{context}"})
+        
+        messages.append({"role": "user", "content": query})
         
         try:
-            # Construir prompt con contexto
-            messages = [
-                {"role": "system", "content": tool_config["system_prompt"]}
-            ]
-            
-            if context:
-                messages.append({"role": "system", "content": f"CONTEXTO ADICIONAL: {context}"})
-            
-            messages.append({"role": "user", "content": user_query})
-            
             response = requests.post(
                 f"{self.base_url}/chat/completions",
                 headers={
@@ -318,133 +393,121 @@ Responde en JSON:
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": tool_config["model"],
+                    "model": tool["model"],
                     "messages": messages,
                     "temperature": 0.7,
-                    "max_tokens": 2000
+                    "max_tokens": 1500
                 },
                 timeout=30
             )
             
             if response.status_code == 200:
                 return response.json()['choices'][0]['message']['content']
-            else:
-                return f"❌ Error OpenAI {tool_name}: HTTP {response.status_code}"
-                
         except Exception as e:
-            return f"❌ Error OpenAI {tool_name}: {str(e)}"
+            print(f"[AgroIA] Error llamando experto: {e}")
+        
+        return "Error al consultar experto agrónomo"
     
-    def execute_multi_tool_strategy(self, tools_needed: List[str], user_query: str, analysis: Dict) -> Dict[str, str]:
-        """Ejecuta múltiples herramientas con estrategia específica"""
+    def synthesize_response(self, query: str, results: Dict[str, str]) -> str:
+        """Sintetiza respuestas de múltiples fuentes"""
         
-        results = {}
-        execution_context = ""
+        # Filtrar válidas
+        valid = {k: v for k, v in results.items() if v and len(v) > 50}
         
-        # Orden de ejecución optimizado para consultas agrícolas
-        execution_order = self.optimize_execution_order(tools_needed, analysis)
-        
-        for i, tool in enumerate(execution_order):
-            print(f"[SuperAgroIA] 🔧 Ejecutando {tool} ({i+1}/{len(execution_order)})")
+        if not valid:
+            if self.rag.enabled:
+                try:
+                    total_docs = self.rag.rag_system.vector_store.count()
+                    if total_docs == 0:
+                        return (
+                            "Base de documentos vacía\n\n"
+                            "Aún no hay documentos técnicos cargados en el sistema RAG.\n\n"
+                            "Para consultas técnicas específicas:\n"
+                            "- Sube etiquetas de productos (PDF)\n"
+                            "- Comparte análisis de suelo\n"
+                            "- Adjunta manuales técnicos\n\n"
+                            "Mientras tanto, puedo ayudarte con:\n"
+                            "- Recomendaciones agronómicas generales\n"
+                            "- Consultas sobre clima\n"
+                            "- Precios de insumos\n\n"
+                            "¿Reformulamos tu consulta?"
+                        )
+                except:
+                    pass
             
-            # Construir contexto acumulativo
-            if execution_context:
-                context = f"INFORMACIÓN PREVIA: {execution_context}"
-            else:
-                context = f"ANÁLISIS: {analysis['reasoning']}"
+            return "No se pudo obtener información suficiente. Intenta reformular tu consulta o sube documentos relevantes."
+        
+        # Si solo hay una fuente, devolverla directamente
+        if len(valid) == 1:
+            tool_name, response = list(valid.items())[0]
+            tool_desc = self.tools[tool_name]["description"]
             
-            # Ejecutar herramienta
-            result = self.execute_tool(tool, user_query, context)
-            results[tool] = result
+            # Si es RAG, mantener formato original
+            if tool_name == "rag":
+                return response
             
-            # Actualizar contexto para próximas herramientas
-            if not result.startswith("❌") and len(result) > 50:
-                execution_context += f"\n{tool}: {result[:200]}..."
-            
-            # Log resultado
-            status = "✅" if not result.startswith("❌") else "❌"
-            preview = result[:80] + "..." if len(result) > 80 else result
-            print(f"[SuperAgroIA] {status} {tool}: {preview}")
+            return f"{response}\n\n---\n*Fuente: {tool_desc}*"
         
-        return results
-    
-    def optimize_execution_order(self, tools: List[str], analysis: Dict) -> List[str]:
-        """Optimiza el orden de ejecución según el tipo de consulta"""
-        
-        # Orden preferido para diferentes tipos de consultas
-        priority_orders = {
-            "weather_first": ["weather_forecast", "agronomist_expert", "market_prices", "web_search", "document_rag", "technical_advisor"],
-            "market_first": ["market_prices", "web_search", "agronomist_expert", "weather_forecast", "document_rag", "technical_advisor"],
-            "technical_first": ["document_rag", "web_search", "technical_advisor", "agronomist_expert", "weather_forecast", "market_prices"],
-            "expert_first": ["agronomist_expert", "weather_forecast", "market_prices", "web_search", "document_rag", "technical_advisor"]
-        }
-        
-        # Determinar estrategia según análisis
-        query_type = analysis.get("query_type", "")
-        
-        if "clima" in query_type or "weather" in analysis.get("agricultural_factors", []):
-            order = priority_orders["weather_first"]
-        elif "precio" in query_type or "económico" in str(analysis.get("agricultural_factors", [])):
-            order = priority_orders["market_first"]
-        elif "análisis" in query_type or "documento" in query_type:
-            order = priority_orders["technical_first"]
-        else:
-            order = priority_orders["expert_first"]
-        
-        # Filtrar solo las herramientas necesarias en el orden optimizado
-        return [tool for tool in order if tool in tools]
-    
-    def synthesize_agricultural_response(self, user_query: str, analysis: Dict, tool_results: Dict[str, str]) -> str:
-        """Síntesis especializada para respuestas agrícolas"""
-        
-        # Filtrar resultados válidos
-        valid_results = {
-            tool: result for tool, result in tool_results.items()
-            if result and not result.startswith("❌") and len(result.strip()) > 30
-        }
-        
-        if not valid_results:
-            # Fallback total con experto agrónomo
-            print("[SuperAgroIA] Sin resultados válidos, usando fallback de experto")
-            fallback = self.execute_tool("agronomist_expert", user_query)
-            if not fallback.startswith("❌"):
-                return f"{fallback}\n\n---\n*🌱 Respuesta del experto agrónomo (fallback)*"
-            else:
-                return "❌ **Error en todas las herramientas consultadas.** Por favor, reformula tu consulta o contacta soporte técnico."
-        
-        # Respuesta única válida
-        if len(valid_results) == 1:
-            tool, result = list(valid_results.items())[0]
-            tool_desc = self.tools[tool]["description"]
-            return f"{result}\n\n---\n*🔧 Fuente: {tool_desc}*"
-        
-        # Múltiples fuentes - síntesis avanzada
-        synthesis_prompt = f"""
-Eres un experto ingeniero agrónomo que debe sintetizar información de múltiples fuentes para dar la mejor respuesta.
+        # Múltiples fuentes - síntesis inteligente
+        synthesis_prompt = f"""Sintetiza la siguiente información para responder la consulta del usuario.
 
-CONSULTA ORIGINAL: "{user_query}"
-
-TIPO DE CONSULTA: {analysis.get('query_type', 'consulta agrícola')}
-FACTORES CONSIDERADOS: {', '.join(analysis.get('agricultural_factors', []))}
+CONSULTA: {query}
 
 INFORMACIÓN RECOPILADA:
 """
         
-        for tool, result in valid_results.items():
-            tool_desc = self.tools[tool]["description"]
-            synthesis_prompt += f"\n=== {tool.upper()} ({tool_desc}) ===\n{result}\n"
+        for tool_name, response in valid.items():
+            tool_desc = self.tools[tool_name]["description"]
+            synthesis_prompt += f"\n### {tool_desc}\n{response[:800]}\n"
         
-        synthesis_prompt += f"""
+        synthesis_prompt += """\n
+INSTRUCCIONES PARA RECOMENDACIÓN AGRÍCOLA INTELIGENTE:
 
-INSTRUCCIONES PARA LA SÍNTESIS:
-1. Combina toda la información relevante de manera coherente
-2. Prioriza recomendaciones prácticas y actionables
-3. Considera factores económicos, técnicos y ambientales
-4. Incluye advertencias o precauciones importantes
-5. Estructura la respuesta de forma clara y profesional
-6. Si hay conflictos entre fuentes, explica las diferencias
-7. Proporciona pasos concretos cuando sea aplicable
+1. **ANÁLISIS TÉCNICO**: Revisa la información del producto (dosis, condiciones, restricciones)
+2. **ANÁLISIS CLIMÁTICO**: Evalúa las condiciones meteorológicas (temperatura, lluvia, viento, humedad)
+3. **COMPATIBILIDAD**: Determina si las condiciones climáticas son compatibles con los requisitos del producto
+4. **RECOMENDACIÓN CLARA**: Da una conclusión definitiva:
+   - ✅ "RECOMENDADO: Las condiciones son ideales para la aplicación"
+   - ⚠️ "PRECAUCIÓN: Aplicar con cuidado debido a [razón específica]"
+   - ❌ "NO RECOMENDADO: Las condiciones no son adecuadas debido a [razón específica]"
 
-Genera una respuesta final completa y profesional:"""
+5. **FORMATO DE RESPUESTA ESTRUCTURADO**:
+
+**PARA PREGUNTAS SIMPLES**:
+**🌿 [PRODUCTO] - [TIPO]**
+**🎯 Respuesta Directa**
+**📋 Información Técnica**
+**💧 Aplicación y Dosis**
+**⚠️ Precauciones**
+
+**PARA CONSULTAS DE APLICACIÓN**:
+**🌾 Recomendación de Aplicación: [PRODUCTO]**
+
+**📋 Información del Producto**
+[Datos técnicos con citaciones]
+
+**🌤️ Condiciones Climáticas**
+[Datos meteorológicos específicos]
+
+**🔍 Análisis de Compatibilidad**
+[Evaluación técnica]
+
+**🎯 Recomendación Final**
+✅/⚠️/❌ [RECOMENDACIÓN CLARA]
+
+**💡 Consejos Prácticos**
+[Horarios, calibración, EPP]
+
+**⚠️ Advertencias**
+[Seguridad y precauciones]
+
+6. **CONSIDERACIONES CLIMÁTICAS CRÍTICAS**:
+   - Temperatura: Evitar aplicación si >25°C o <5°C
+   - Lluvia: No aplicar si hay lluvia pronosticada en 6-24h
+   - Viento: Evitar si viento >15 km/h
+   - Humedad: Considerar para eficacia del producto
+
+Genera una respuesta profesional, práctica y definitiva (máximo 500 palabras):"""
 
         try:
             response = requests.post(
@@ -454,154 +517,172 @@ Genera una respuesta final completa y profesional:"""
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "gpt-4o",  # Usar modelo más potente para síntesis
+                    "model": "gpt-4o",
                     "messages": [{"role": "user", "content": synthesis_prompt}],
                     "temperature": 0.6,
-                    "max_tokens": 2500
+                    "max_tokens": 1500
                 },
                 timeout=30
             )
             
             if response.status_code == 200:
-                final_response = response.json()['choices'][0]['message']['content']
+                final = response.json()['choices'][0]['message']['content']
                 
-                # Agregar metadatos
-                tools_used = list(valid_results.keys())
-                tools_desc = [self.tools[tool]["description"] for tool in tools_used]
-                footer = f"\n\n---\n*🔧 Fuentes consultadas: {', '.join(tools_desc)}*"
+                # Agregar footer con fuentes
+                sources = [self.tools[k]["description"] for k in valid.keys()]
+                footer = f"\n\n---\n*Fuentes consultadas: {', '.join(sources)}*"
                 
-                return final_response + footer
-            else:
-                # Fallback: mejor respuesta individual
-                return self.get_best_individual_result(valid_results)
-                
+                return final + footer
         except Exception as e:
-            print(f"[SuperAgroIA] Error en síntesis: {e}")
-            return self.get_best_individual_result(valid_results)
-    
-    def get_best_individual_result(self, valid_results: Dict[str, str]) -> str:
-        """Selecciona la mejor respuesta individual"""
+            print(f"[AgroIA] Error en síntesis: {e}")
         
-        # Priorizar por relevancia agrícola
-        priority = ["agronomist_expert", "weather_forecast", "market_prices", "document_rag", "web_search", "technical_advisor"]
-        
+        # Fallback: mejor respuesta individual
+        priority = ["rag", "expert", "weather", "prices"]
         for tool in priority:
-            if tool in valid_results:
-                result = valid_results[tool]
-                tool_desc = self.tools[tool]["description"]
-                return f"{result}\n\n---\n*📋 Respuesta principal: {tool_desc}*"
+            if tool in valid:
+                return f"{valid[tool]}\n\n---\n*Fuente principal: {self.tools[tool]['description']}*"
         
-        # Si no hay prioridades, usar la más larga (más completa)
-        best_tool = max(valid_results.keys(), key=lambda k: len(valid_results[k]))
-        return f"{valid_results[best_tool]}\n\n---\n*🔧 {self.tools[best_tool]['description']}*"
+        return list(valid.values())[0]
 
-def extract_user_message(request: Dict[str, Any]) -> str:
-    """Extrae el mensaje del usuario del request"""
-    try:
-        # OpenWebUI format
-        if "body" in request and "messages" in request["body"]:
-            messages = request["body"]["messages"]
-            if messages:
-                return messages[-1].get("content", "").strip()
-        
-        # Direct messages
-        if "messages" in request:
-            messages = request["messages"]
-            if messages:
-                return messages[-1].get("content", "").strip()
-        
-        # Alternative formats
-        for key in ["prompt", "query", "input", "text"]:
-            if key in request and request[key]:
-                return str(request[key]).strip()
-                
-    except Exception as e:
-        print(f"[SuperAgroIA] Error extrayendo mensaje: {e}")
+
+def extract_message(request: Dict[str, Any]) -> tuple[str, List[Dict[str, str]]]:
+    """Extrae mensaje del usuario Y el historial de conversación"""
+    messages_history = []
+    current_message = ""
     
-    return ""
+    try:
+        messages_list = None
+        if "body" in request and "messages" in request["body"]:
+            messages_list = request["body"]["messages"]
+        elif "messages" in request:
+            messages_list = request["messages"]
+        
+        if messages_list and isinstance(messages_list, list):
+            for msg in messages_list[-6:-1]:
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    content = msg.get("content", "").strip()
+                    if content and role in ["user", "assistant"]:
+                        messages_history.append({
+                            "role": role,
+                            "content": content[:300]
+                        })
+            
+            if messages_list:
+                current_message = messages_list[-1].get("content", "").strip()
+        
+        if not current_message:
+            for key in ["prompt", "query", "input"]:
+                if key in request:
+                    current_message = str(request[key]).strip()
+                    break
+    except Exception as e:
+        print(f"[Extract] Error: {e}")
+    
+    return current_message, messages_history
+
 
 def pipeline(request: Dict[str, Any]) -> Dict[str, Any]:
-    """Pipeline principal del Super Chat IA Agrícola"""
+    """Pipeline principal de Super AgroIA Master"""
     
     try:
-        # Extraer consulta del usuario
-        user_query = extract_user_message(request)
+        query, history = extract_message(request)
         
-        if not user_query:
+        if not query:
             return {"output": (
-                "🌱 **Super AgroIA Chat - Tu Ingeniero Agrónomo Virtual**\n\n"
-                "¡Hola! Soy tu asistente agrícola inteligente que puede:\n\n"
-                "🧠 **Analizar consultas complejas** sobre agricultura\n"
-                "🌤️ **Consultar clima y pronósticos** para planificar aplicaciones\n"
-                "💰 **Buscar precios** de herbicidas, fertilizantes e insumos\n"
-                "📚 **Hacer RAG** sobre documentos específicos de tu fundo\n"
-                "🔍 **Investigar** plagas, enfermedades y técnicas\n"
-                "⚡ **Sintetizar todo** en recomendaciones prácticas\n\n"
-                "**Ejemplos de consultas:**\n"
-                "• *\"Necesito aplicar herbicida X el día Y, ¿cómo está el pronóstico?\"*\n"
-                "• *\"Análisis del suelo del fundo Z y recomendaciones\"*\n" 
-                "• *\"Mejor momento para sembrar trigo según clima y precios\"*\n"
-                "• *\"Control de plaga Y en cultivo Z, opciones y costos\"*\n\n"
-                "**¿Qué consulta agrícola tienes hoy?** 🚜"
+                "Super AgroIA Master v2.2\n\n"
+                "Asistente agrícola inteligente con:\n"
+                "- RAG sobre documentos técnicos\n"
+                "- Clima en tiempo real\n"
+                "- Precios de insumos\n"
+                "- Experto agrónomo IA\n\n"
+                "Ejemplos:\n"
+                "- \"¿Cuántas veces aplicar Shark en trigo?\"\n"
+                "- \"Clima para aplicar herbicida mañana\"\n"
+                "- \"Precio de fertilizantes NPK\"\n\n"
+                "¿En qué puedo ayudarte?"
             )}
         
-        print(f"[SuperAgroIA] 🌱 Nueva consulta agrícola: '{user_query[:70]}{'...' if len(user_query) > 70 else ''}'")
+        print(f"\n{'='*60}")
+        print(f"[AgroIA Master] CONSULTA: {query[:80]}...")
+        if history:
+            print(f"[AgroIA Master] Historial: {len(history)} mensajes previos")
+        print(f"{'='*60}\n")
         
-        # Crear instancia del super chat
-        super_chat = SuperAgroIAChat()
+        agroia = SuperAgroIAMaster()
         
-        # Fase 1: Análisis inteligente de la consulta
-        print("[SuperAgroIA] 📊 Analizando consulta agrícola...")
-        analysis = super_chat.analyze_agricultural_query(user_query)
+        tools_needed = agroia.analyze_query(query, history)
+        print(f"[AgroIA Master] Herramientas detectadas: {tools_needed}")
         
-        print(f"[SuperAgroIA] 🎯 Tipo: {analysis['query_type']}")
-        print(f"[SuperAgroIA] 🔧 Herramientas: {analysis['tools_needed']}")
-        print(f"[SuperAgroIA] 🌾 Factores: {analysis['agricultural_factors']}")
-        print(f"[SuperAgroIA] 💭 Complejidad: {analysis['complexity']}")
+        enriched_query = query
+        if history and "rag" in tools_needed:
+            for msg in reversed(history):
+                if msg["role"] == "user":
+                    enriched_query = f"CONTEXTO PREVIO: {msg['content'][:150]}\n\nCONSULTA ACTUAL: {query}"
+                    print(f"[AgroIA Master] Query enriquecida con contexto")
+                    break
         
-        # Fase 2: Ejecución de herramientas
-        print("[SuperAgroIA] 🚜 Ejecutando herramientas especializadas...")
-        tool_results = super_chat.execute_multi_tool_strategy(
-            analysis["tools_needed"], 
-            user_query, 
-            analysis
-        )
+        results = {}
         
-        # Fase 3: Síntesis agrícola especializada
-        print("[SuperAgroIA] 🌱 Sintetizando respuesta agrícola...")
-        final_response = super_chat.synthesize_agricultural_response(
-            user_query, 
-            analysis, 
-            tool_results
-        )
+        for tool in tools_needed:
+            print(f"\n[AgroIA Master] Ejecutando: {tool}")
+            print(f"{'─'*60}")
+            
+            if tool == "rag":
+                result = agroia.execute_rag(enriched_query, request)
+                if result:
+                    results[tool] = result
+                    print(f"[AgroIA Master] ✓ RAG - {len(result)} caracteres")
+                    print(f"    Preview: {result[:100]}...")
+                else:
+                    print(f"[AgroIA Master] RAG - Sin resultados")
+                    
+            elif tool == "expert":
+                continue
+            else:
+                result = agroia.execute_pipeline(tool, query)
+                if result:
+                    results[tool] = result
+                    print(f"[AgroIA Master] ✓ {tool} - {len(result)} caracteres")
+                else:
+                    print(f"[AgroIA Master] {tool} - Sin resultados")
         
-        # Agregar metadatos finales
-        timestamp = datetime.now().strftime('%H:%M')
-        complexity_emoji = {"simple": "🟢", "medium": "🟡", "complex": "🔴"}
+        if "expert" in tools_needed:
+            print(f"\n[AgroIA Master] Ejecutando: expert")
+            print(f"{'─'*60}")
+            
+            if results:
+                context_parts = []
+                for k, v in results.items():
+                    preview = v[:300] if len(v) > 300 else v
+                    context_parts.append(f"{k}: {preview}")
+                context = "\n\n".join(context_parts)
+                
+                results["expert"] = agroia.call_expert(query, context)
+                print(f"[AgroIA Master] ✓ expert (con contexto) - {len(results['expert'])} caracteres")
+            else:
+                results["expert"] = agroia.call_expert(query)
+                print(f"[AgroIA Master] ✓ expert (sin contexto) - {len(results['expert'])} caracteres")
         
-        if len(final_response) < 2000:
-            metadata = (f"\n\n🕐 *{timestamp}* • "
-                       f"{complexity_emoji.get(analysis['complexity'], '⚫')} *{analysis['complexity'].title()}* • "
-                       f"🔧 *{len(analysis['tools_needed'])} herramientas*")
-            final_response += metadata
+        print(f"\n[AgroIA Master] Sintetizando respuesta final...")
+        print(f"{'─'*60}")
+        print(f"Resultados válidos: {list(results.keys())}")
         
-        print(f"[SuperAgroIA] ✅ Respuesta completada - {len(final_response)} caracteres")
+        final_response = agroia.synthesize_response(query, results)
+        
+        print(f"\n[AgroIA Master] ✓ COMPLETADO")
+        print(f"{'='*60}")
+        print(f"Respuesta: {len(final_response)} caracteres")
+        print(f"{'='*60}\n")
         
         return {"output": final_response}
         
     except Exception as e:
-        error_msg = str(e)
-        print(f"[SuperAgroIA] ❌ Error crítico: {error_msg}")
-        return {"output": (
-            f"❌ **Error en Super AgroIA Chat:** {error_msg}\n\n"
-            "🔧 **Soluciones posibles:**\n"
-            "• Verifica que tus pipelines estén funcionando\n"
-            "• Revisa la configuración de OpenAI API\n"
-            "• Intenta reformular tu consulta\n\n"
-            "💬 **Contacta soporte técnico si el problema persiste**"
-        )}
+        print(f"\n[AgroIA Master] ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"output": f"Error: {str(e)}\n\nIntenta reformular tu consulta."}
 
-# Función principal
+
 def main(request):
-    """Función principal para compatibilidad"""
     return pipeline(request)
