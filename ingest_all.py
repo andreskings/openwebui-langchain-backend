@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 # Configurar la API key de OpenAI
-OPENAI_API_KEY = "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"
+OPENAI_API_KEY = ""
 
 # Directorio que contiene los documentos
 DOCUMENTS_DIR = "documents"
