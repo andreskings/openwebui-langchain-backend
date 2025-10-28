@@ -1,6 +1,5 @@
 """
 Sistema RAG Optimizado Específicamente para Trigo
-VERSIÓN COMPATIBLE CON CHROMADB 384D - USA SENTENCE TRANSFORMERS
 Extracción avanzada de herbicidas, fungicidas e insecticidas con tablas y metadata enriquecida
 """
 
@@ -12,19 +11,11 @@ from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import chromadb
 from chromadb.config import Settings
+import requests
 import fitz  # PyMuPDF
 import pdfplumber
 import re
 from dataclasses import dataclass
-
-# CAMBIO CRÍTICO: Usar Sentence Transformers en lugar de OpenAI
-try:
-    from sentence_transformers import SentenceTransformer
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
-    print("⚠️  WARNING: sentence-transformers no está instalado")
-    print("   Instala con: pip install sentence-transformers")
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)
@@ -69,26 +60,13 @@ class PesticideInfo:
             self.compatibility = []
 
 class WheatRAGSystem:
-    """Sistema RAG optimizado para pesticidas de trigo - COMPATIBLE CON CHROMADB 384D"""
+    """Sistema RAG optimizado para pesticidas de trigo"""
     
     def __init__(self, persist_directory: str = "./chroma_trigo_v1"):
         self.persist_directory = persist_directory
         self.embedding_cache = {}
-        
-        # CAMBIO CRÍTICO: Usar Sentence Transformers en lugar de OpenAI
-        if not SENTENCE_TRANSFORMERS_AVAILABLE:
-            raise ImportError(
-                "sentence-transformers es requerido. Instala con:\n"
-                "pip install sentence-transformers"
-            )
-        
-        # Modelo de embeddings optimizado para español y multilingüe
-        # Este modelo genera embeddings de 384 dimensiones (compatible con ChromaDB)
-        logger.info("[RAG Trigo] Cargando modelo de embeddings local...")
-        self.embedding_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-        self.embedding_dimension = 384
-        
-        logger.info(f"[RAG Trigo] ✅ Modelo cargado: paraphrase-multilingual-MiniLM-L12-v2 ({self.embedding_dimension}D)")
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         
         # Configurar ChromaDB
         self.client = chromadb.PersistentClient(
@@ -99,15 +77,10 @@ class WheatRAGSystem:
         # Crear colección específica para trigo
         self.collection = self.client.get_or_create_collection(
             name="pesticidas_trigo",
-            metadata={
-                "description": "Pesticidas específicos para cultivo de trigo",
-                "embedding_model": "paraphrase-multilingual-MiniLM-L12-v2",
-                "embedding_dimension": str(self.embedding_dimension)
-            }
+            metadata={"description": "Pesticidas específicos para cultivo de trigo"}
         )
         
         logger.info(f"[RAG Trigo] Inicializado con {self.collection.count()} documentos")
-        logger.info(f"[RAG Trigo] Embeddings: Sentence Transformers (384D) - Compatible ChromaDB ✅")
     
     def extract_pesticide_info(self, text: str, source_file: str) -> List[PesticideInfo]:
         """Extrae información COMPLETA de pesticidas del texto"""
@@ -665,34 +638,35 @@ class WheatRAGSystem:
         return chunks
     
     def get_embedding(self, text: str) -> List[float]:
-        """Obtiene embedding usando Sentence Transformers (384D) - COMPATIBLE CHROMADB"""
+        """Obtiene embedding usando OpenAI API"""
         if text in self.embedding_cache:
             return self.embedding_cache[text]
         
         try:
-            # Truncar texto si es muy largo (max 512 tokens para el modelo)
-            max_length = 512
-            if len(text) > max_length * 4:  # Aproximadamente 4 chars por token
-                text = text[:max_length * 4]
+            response = requests.post(
+                f"{self.base_url}/embeddings",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "text-embedding-3-small",
+                    "input": text
+                },
+                timeout=30
+            )
             
-            # Generar embedding con Sentence Transformers
-            embedding = self.embedding_model.encode(
-                text,
-                convert_to_tensor=False,
-                show_progress_bar=False
-            ).tolist()
-            
-            # Verificar dimensión
-            if len(embedding) != self.embedding_dimension:
-                logger.error(f"ERROR: Embedding generado con dimensión {len(embedding)}, esperado {self.embedding_dimension}")
-                return [0.0] * self.embedding_dimension
-            
-            self.embedding_cache[text] = embedding
-            return embedding
+            if response.status_code == 200:
+                embedding = response.json()["data"][0]["embedding"]
+                self.embedding_cache[text] = embedding
+                return embedding
+            else:
+                logger.error(f"Error API embedding: {response.status_code}")
+                return [0.0] * 1536
                 
         except Exception as e:
             logger.error(f"Error obteniendo embedding: {e}")
-            return [0.0] * self.embedding_dimension
+            return [0.0] * 1536
     
     def add_documents(self, chunks: List[Dict[str, Any]]):
         """Añade documentos a la colección ChromaDB"""
@@ -703,15 +677,10 @@ class WheatRAGSystem:
         metadatas = [chunk["metadata"] for chunk in chunks]
         ids = [f"chunk_{i}_{chunk['metadata']['source_file']}" for i, chunk in enumerate(chunks)]
         
-        logger.info(f"[RAG Trigo] Generando {len(texts)} embeddings con Sentence Transformers...")
         embeddings = []
-        for i, text in enumerate(texts):
-            if i % 10 == 0:
-                logger.info(f"[RAG Trigo] Embeddings: {i}/{len(texts)}")
+        for text in texts:
             embedding = self.get_embedding(text)
             embeddings.append(embedding)
-        
-        logger.info(f"[RAG Trigo] ✅ {len(embeddings)} embeddings generados (384D)")
         
         self.collection.add(
             documents=texts,
@@ -723,12 +692,8 @@ class WheatRAGSystem:
         logger.info(f"[RAG Trigo] ✅ {len(chunks)} chunks añadidos a la base")
     
     def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        """Busca documentos relevantes usando Sentence Transformers"""
-        logger.info(f"[RAG Trigo] 🔍 Buscando: '{query[:50]}...'")
-        
+        """Busca documentos relevantes"""
         query_embedding = self.get_embedding(query)
-        
-        logger.info(f"[RAG Trigo] Embedding query: {len(query_embedding)}D")
         
         results = self.collection.query(
             query_embeddings=[query_embedding],
@@ -749,10 +714,6 @@ class WheatRAGSystem:
                     "similarity": 1 - distance,
                     "rank": i + 1
                 })
-            
-            logger.info(f"[RAG Trigo] ✅ Encontrados {len(formatted_results)} resultados")
-        else:
-            logger.warning(f"[RAG Trigo] ⚠️  No se encontraron resultados")
         
         return formatted_results
     
@@ -902,45 +863,13 @@ def process_documents_directory(rag_system: WheatRAGSystem, documents_dir: str =
 
 if __name__ == "__main__":
     # Ejemplo de uso
-    print("="*60)
-    print("🌾 SISTEMA RAG TRIGO - VERSIÓN COMPATIBLE CHROMADB 384D")
-    print("="*60)
+    rag = WheatRAGSystem()
     
-    try:
-        rag = WheatRAGSystem()
-        
-        # Mostrar información del sistema
-        print(f"\n📊 Estado del Sistema:")
-        print(f"   - Documentos en base: {rag.count()}")
-        print(f"   - Modelo embeddings: paraphrase-multilingual-MiniLM-L12-v2")
-        print(f"   - Dimensión embeddings: {rag.embedding_dimension}D")
-        print(f"   - Compatible con ChromaDB: ✅")
-        
-        # Si la base está vacía, procesar documentos
-        if rag.count() == 0:
-            print(f"\n⚠️  Base de datos vacía. Procesando documentos...")
-            process_documents_directory(rag)
-        
-        # Prueba de búsqueda
-        print(f"\n🔍 Prueba de búsqueda:")
-        test_queries = [
-            "herbicida trigo postemergente",
-            "fungicida roya trigo",
-            "dosis glifosato trigo"
-        ]
-        
-        for query in test_queries:
-            print(f"\n   Query: '{query}'")
-            results = rag.search(query, top_k=3)
-            print(f"   Resultados: {len(results)}")
-            for i, result in enumerate(results, 1):
-                source = result['metadata'].get('source_file', 'Unknown')
-                similarity = result.get('similarity', 0)
-                print(f"      {i}. {source} (similitud: {similarity:.2%})")
-        
-        print(f"\n✅ Sistema RAG funcionando correctamente")
-        
-    except Exception as e:
-        print(f"\n❌ Error inicializando sistema: {e}")
-        import traceback
-        traceback.print_exc()
+    # Procesar documentos
+    process_documents_directory(rag)
+    
+    # Prueba de búsqueda
+    results = rag.search("herbicida trigo dosis", top_k=5)
+    print(f"\nResultados de prueba: {len(results)}")
+    for result in results:
+        print(f"- {result['metadata']['source_file']} (similitud: {result['similarity']:.2%})")

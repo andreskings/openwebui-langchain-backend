@@ -7,3 +7,12 @@ __pycache__/
 /documents
 /chroma_agricultural
 /chroma_agricultural_ultimate
+/chroma_arroz_v1
+/chroma_lentejas_v2/a668b60a-c885-497e-bc11-5a72462aa6d7/
+/chroma_server_data/
+/chroma_trigo_v1/ff567573-e69b-4ed2-9288-383cd7beb3ce/
+/chromadb
+/documents_arroz/
+/documents_trigo/
+/exports/
+chroma_lentejas_v2/chroma.sqlite3

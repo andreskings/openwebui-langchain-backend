@@ -17,6 +17,14 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from pathlib import Path
 
+# Importar LLM Router con fallback
+try:
+    from llm_router import llm_router
+    LLM_ROUTER_AVAILABLE = True
+except ImportError:
+    LLM_ROUTER_AVAILABLE = False
+    print("[Experto Trigo] ⚠️  LLM Router no disponible - usando OpenAI directo")
+
 # Añadir path para importar módulos
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -250,7 +258,9 @@ class WheatExpertCompletePipeline:
         
         if any(keyword in query_lower for keyword in weather_keywords):
             intent["needs_weather"] = True
-            intent["query_type"] = "weather_related"
+            # Solo cambiar query_type si no es ya technical_product (RAG)
+            if intent["query_type"] == "general":
+                intent["query_type"] = "weather_related"
             
             # Detectar ubicación (ciudades principales de Chile)
             ciudades_chile = {
@@ -283,13 +293,31 @@ class WheatExpertCompletePipeline:
                 "pucón": "Pucón",
                 "castro": "Castro",
                 "coyhaique": "Coyhaique",
-                "punta arenas": "Punta Arenas"
+                "punta arenas": "Punta Arenas",
+                "longavi": "Longaví",
+                "longaví": "Longaví",
+                "cobquecura": "Cobquecura",
+                "quirihue": "Quirihue",
+                "viña del mar": "Viña del Mar",
+                "vina del mar": "Viña del Mar"
             }
             
             for ciudad_key, ciudad_name in ciudades_chile.items():
                 if ciudad_key in query_lower:
                     intent["weather_location"] = ciudad_name
                     break
+            
+            # Detectar período temporal (hoy, mañana, próximos días)
+            import re
+            if "mañana" in query_lower or "tomorrow" in query_lower:
+                intent["weather_days"] = 2
+            elif "hoy" in query_lower or "today" in query_lower:
+                intent["weather_days"] = 1
+            elif "proximos" in query_lower or "próximos" in query_lower:
+                dias_match = re.search(r'(\d+)\s*días', query_lower)
+                if dias_match:
+                    intent["weather_days"] = min(int(dias_match.group(1)), 7)
+            # Si no se especifica, usar default de 7 días (se maneja en el pipeline)
         
         # Detectar necesidad de RAG
         rag_keywords = [
@@ -297,7 +325,10 @@ class WheatExpertCompletePipeline:
             "etiqueta", "ficha técnica", "principio activo",
             "controlar maleza", "eliminar", "precauciones",
             "malezas", "enfermedades", "plagas",
-            "glifosato", "2,4-d", "mcpa", "dicamba", "metsulfuron"
+            "glifosato", "2,4-d", "mcpa", "dicamba", "metsulfuron",
+            # Nombres comerciales comunes
+            "ajax", "portento", "ally", "hussar", "axial", "broadway", "atlantis",
+            "traxos", "refinar", "affinity", "aramo", "topik", "puma", "cossack"
         ]
         
         if any(keyword in query_lower for keyword in rag_keywords):
@@ -312,8 +343,15 @@ class WheatExpertCompletePipeline:
             return None
         
         try:
-            query = f"Pronóstico del clima para {location} próximos {days} días"
-            print(f"[Experto Trigo] 🌤️ Ejecutando pipeline clima...")
+            # Construir consulta según el número de días
+            if days == 1:
+                query = f"Clima hoy en {location}"
+            elif days == 2:
+                query = f"Clima mañana en {location}"
+            else:
+                query = f"Pronóstico del clima para {location} próximos {days} días"
+            
+            print(f"[Experto Trigo] 🌤️ Ejecutando pipeline clima: '{query}'")
             
             # Ejecutar pipeline con formato estándar
             result = self.weather_system({
@@ -602,52 +640,77 @@ Ahora responde la consulta de forma profesional, visual y práctica."""
                         "content": msg["content"]
                     })
             
-            # Llamar a OpenAI
-            response = requests.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": self.model,
-                    "messages": llm_messages,
-                    "temperature": 0.1,
-                    "max_tokens": 1800
-                },
-                timeout=60
-            )
-            
-            if response.status_code == 200:
-                answer = response.json()["choices"][0]["message"]["content"]
-                
-                # Footer informativo
-                footer = "\n\n---\n"
-                sources = []
-                
-                if weather_data:
-                    sources.append("🌤️ Clima en tiempo real")
-                if rag_data:
-                    sources.append("📚 Documentos técnicos")
-                sources.append("🧠 Conocimiento experto")
-                
-                footer += f"**Fuentes**: {' + '.join(sources)}\n"
-                footer += "🌾 *Experto Completo en Trigo - AgroIA v1.0.0*"
-                
-                return self._create_success_response(
-                    answer + footer,
-                    {
-                        "used_weather": weather_data is not None,
-                        "used_rag": rag_data is not None,
-                        "query_type": intent["query_type"],
-                        "model": self.model,
-                        "version": "1.0.0"
-                    }
+            # Llamar a LLM con fallback automático
+            if LLM_ROUTER_AVAILABLE:
+                print(f"[Experto Trigo] 🤖 Usando LLM Router con fallback")
+                llm_result = llm_router.generate(
+                    messages=llm_messages,
+                    temperature=0.1,
+                    max_tokens=1800,
+                    timeout=60
                 )
+                
+                if llm_result["success"]:
+                    answer = llm_result["content"]
+                    model_used = llm_result["model_used"]
+                    is_fallback = llm_result["is_fallback"]
+                    
+                    if is_fallback:
+                        print(f"[Experto Trigo] 🔄 Fallback usado: {model_used}")
+                    else:
+                        print(f"[Experto Trigo] ✅ Modelo principal: {model_used}")
+                else:
+                    return self._create_error_response("Sistema de IA temporalmente no disponible")
             else:
-                error_msg = f"Error en API OpenAI: {response.status_code}"
-                print(f"[Experto Trigo] {error_msg}")
-                return self._create_error_response(error_msg)
+                # Fallback a OpenAI directo si no hay router
+                response = requests.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": llm_messages,
+                        "temperature": 0.1,
+                        "max_tokens": 1800
+                    },
+                    timeout=60
+                )
+                
+                if response.status_code == 200:
+                    answer = response.json()["choices"][0]["message"]["content"]
+                    model_used = self.model
+                    is_fallback = False
+                else:
+                    error_msg = f"Error en API OpenAI: {response.status_code}"
+                    print(f"[Experto Trigo] {error_msg}")
+                    return self._create_error_response(error_msg)
+            
+            # Footer informativo (común para ambos casos)
+            footer = "\n\n---\n"
+            sources = []
+            
+            if weather_data:
+                sources.append("🌤️ Clima en tiempo real")
+            if rag_data:
+                sources.append("📚 Documentos técnicos")
+            sources.append("🧠 Conocimiento experto")
+            
+            footer += f"**Fuentes**: {' + '.join(sources)}\n"
+            footer += "🌾 *Experto Completo en Trigo - AgroIA v1.0.0*"
+            
+            return self._create_success_response(
+                answer + footer,
+                {
+                    "used_weather": weather_data is not None,
+                    "used_rag": rag_data is not None,
+                    "query_type": intent["query_type"],
+                    "model": model_used,
+                    "is_fallback": is_fallback,
+                    "version": "1.0.0"
+                }
+            )
         
         except Exception as e:
             error_msg = f"Error procesando consulta: {str(e)}"

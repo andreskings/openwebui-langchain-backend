@@ -73,14 +73,10 @@ class LentilRAGSystem:
             settings=Settings(anonymized_telemetry=False)
         )
         
-        # Crear colección específica para lentejas (SIN OpenAI embeddings - usa embeddings locales 384D)
+        # Crear colección específica para lentejas
         self.collection = self.client.get_or_create_collection(
             name="herbicidas_lentejas",
-            metadata={
-                "description": "Herbicidas específicos para cultivo de lentejas",
-                "embedding_model": "sentence-transformers",
-                "embedding_dimension": 384
-            }
+            metadata={"description": "Herbicidas específicos para cultivo de lentejas"}
         )
         
         logger.info(f"[RAG Lentejas] Inicializado con {self.collection.count()} documentos")
@@ -1220,35 +1216,31 @@ class LentilRAGSystem:
         logger.info(f"[RAG Lentejas] ✅ {len(chunks)} chunks añadidos a la base")
     
     def search(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        """Busca documentos relevantes usando embeddings de OpenAI"""
-        try:
-            # La colección ya tiene configurado OpenAI embeddings
-            results = self.collection.query(
-                query_texts=[query],
-                n_results=top_k,
-                include=['documents', 'metadatas', 'distances']
-            )
-            
-            # Formatear resultados
-            formatted_results = []
-            if results["documents"] and results["documents"][0]:
-                for i, (doc, metadata, distance) in enumerate(zip(
-                    results["documents"][0],
-                    results["metadatas"][0],
-                    results["distances"][0]
-                )):
-                    formatted_results.append({
-                        "text": doc,
-                        "metadata": metadata,
-                        "similarity": 1 - distance,  # Convertir distancia a similitud
-                        "rank": i + 1
-                    })
-            
-            return formatted_results
-            
-        except Exception as e:
-            logger.error(f"Error en búsqueda de lentejas: {e}")
-            return []
+        """Busca documentos relevantes"""
+        query_embedding = self.get_embedding(query)
+        
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+            include=["documents", "metadatas", "distances"]
+        )
+        
+        # Formatear resultados
+        formatted_results = []
+        if results["documents"] and results["documents"][0]:
+            for i, (doc, metadata, distance) in enumerate(zip(
+                results["documents"][0],
+                results["metadatas"][0],
+                results["distances"][0]
+            )):
+                formatted_results.append({
+                    "text": doc,
+                    "metadata": metadata,
+                    "similarity": 1 - distance,  # Convertir distancia a similitud
+                    "rank": i + 1
+                })
+        
+        return formatted_results
     
     def count(self) -> int:
         """Retorna el número de documentos en la colección"""
