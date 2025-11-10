@@ -1,18 +1,45 @@
-/venv
-/data
-.venv
-.env
+# --- ENTORNO PYTHON ---
+venv/
+.venv/
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-/documents
-/chroma_agricultural
-/chroma_agricultural_ultimate
-/chroma_arroz_v1
-/chroma_lentejas_v2/a668b60a-c885-497e-bc11-5a72462aa6d7/
-/chroma_server_data/
-/chroma_trigo_v1/ff567573-e69b-4ed2-9288-383cd7beb3ce/
-/chromadb
-/documents_arroz/
-/documents_trigo/
-/exports/
-chroma_lentejas_v2/chroma.sqlite3
+# --- ARCHIVOS DE ENTORNO ---
+.env
+.env.*
+
+# --- BASES DE DATOS CHROMA (todas las versiones) ---
+chroma_*/
+chromadb/
+chroma_server_data/
+chroma_agricultural/
+chroma_agricultural_ultimate/
+*/binary_backup/
+*chroma.sqlite3
+*.sqlite3
+*.db
+*.bin
+*.pickle
+
+# --- DOCUMENTOS / ENTRADAS RAG ---
+documents_*/
+documents*/
+documents_arroz/
+documents_trigo/
+documents_lentejas/
+documents_porotos/
+
+# --- EXPORTS Y BACKUPS ---
+exports/
+export_*/
+*_export*/
+*_backup*/
+trigo_database_export_final/
+
+# --- LOGS ---
+*.log
+
+# --- WORKSPACE ---
+*.code-workspace
